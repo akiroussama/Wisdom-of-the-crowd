@@ -3,17 +3,17 @@ The Boardroom AI - Strategic Decision Arena POC
 ================================================
 Une arène de décision stratégique automatisée avec 5 personas IA.
 
-Modèle: Gemini 2.0 Flash-Lite (Google AI)
+Modèle: Gemini 1.5 Flash (Google AI Studio)
 """
 
 import os
 import asyncio
-from typing import TypedDict, List, Dict, Any, Literal
+from typing import TypedDict, List, Dict, Any
 from dotenv import load_dotenv
 
 import chainlit as cl
 from langgraph.graph import StateGraph, END
-import litellm
+import google.generativeai as genai
 
 # ============================================================================
 # CONFIGURATION & VALIDATION
@@ -21,15 +21,15 @@ import litellm
 
 load_dotenv()
 
-# Configuration LiteLLM pour Gemini
-MODEL_NAME = "gemini/gemini-2.0-flash-lite"
+# Configuration Gemini
+MODEL_NAME = "gemini-2.0-flash"
 
 def validate_environment() -> bool:
-    """Valide la présence de la clé API Google."""
+    """Valide la présence de la clé API Google et configure le SDK."""
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
         return False
-    os.environ["GEMINI_API_KEY"] = api_key
+    genai.configure(api_key=api_key)
     return True
 
 # ============================================================================
@@ -317,7 +317,7 @@ Remplis ce template avec les informations du débat. Sois concis et actionnable.
 }
 
 # ============================================================================
-# FONCTIONS LLM
+# FONCTIONS LLM (Google Gemini Direct)
 # ============================================================================
 
 async def call_llm_streaming(
@@ -325,39 +325,40 @@ async def call_llm_streaming(
     messages: List[Dict[str, str]],
     topic: str
 ) -> str:
-    """Appelle le LLM avec streaming et retourne la réponse complète."""
+    """Appelle Gemini avec streaming et retourne la réponse complète."""
 
-    # Construire l'historique pour le LLM
-    llm_messages = [{"role": "system", "content": system_prompt}]
+    # Construire le prompt complet
+    full_prompt = f"{system_prompt}\n\n"
+    full_prompt += f"=== SUJET DU DÉBAT ===\n{topic}\n\n"
 
-    # Ajouter le topic initial
-    llm_messages.append({
-        "role": "user",
-        "content": f"SUJET DU DÉBAT:\n{topic}"
-    })
+    if messages:
+        full_prompt += "=== HISTORIQUE DU DÉBAT ===\n"
+        for msg in messages:
+            full_prompt += f"\n[{msg['role']}]:\n{msg['content']}\n"
+        full_prompt += "\n=== FIN DE L'HISTORIQUE ===\n"
 
-    # Ajouter l'historique des messages
-    for msg in messages:
-        llm_messages.append({
-            "role": "assistant" if msg["role"] != "user" else "user",
-            "content": f"[{msg['role']}]: {msg['content']}"
-        })
+    full_prompt += "\nTa réponse:"
 
-    # Appel LLM avec streaming (Gemini 2.0 Flash-Lite)
-    response = await litellm.acompletion(
-        model=MODEL_NAME,
-        messages=llm_messages,
-        temperature=0.8,
-        max_tokens=1500,
-        stream=True
+    # Créer le modèle et générer
+    model = genai.GenerativeModel(MODEL_NAME)
+
+    # Génération avec streaming
+    response = await asyncio.to_thread(
+        lambda: model.generate_content(
+            full_prompt,
+            generation_config=genai.GenerationConfig(
+                temperature=0.8,
+                max_output_tokens=1500,
+            ),
+            stream=True
+        )
     )
 
     full_response = ""
-    async for chunk in response:
-        if chunk.choices[0].delta.content:
-            content = chunk.choices[0].delta.content
-            full_response += content
-            await cl.context.current_step.stream_token(content)
+    for chunk in response:
+        if chunk.text:
+            full_response += chunk.text
+            await cl.context.current_step.stream_token(chunk.text)
 
     return full_response
 
@@ -387,11 +388,10 @@ async def create_round_node(state: AgentState, round_num: int) -> AgentState:
 
         step.output = response
 
-    # Envoyer le message avec avatar
+    # Envoyer le message
     await cl.Message(
         content=response,
         author=persona["name"],
-        avatar=persona["avatar"],
     ).send()
 
     # Mettre à jour l'état
